@@ -1,28 +1,19 @@
 package main
 
-/*
-#cgo LDFLAGS: -ldl
-//#include <dlfcn.h>
-//typedef long long GoInt64;
-//typedef unsigned long long GoUint64;
-//typedef GoInt64 GoInt;
-//typedef GoUint64 GoUint;
-//typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
-static void callFromLib(void* p,_GoString_ HType,_GoString_ FilePath,_GoString_ Mail) {
-    void (*fn)(_GoString_,_GoString_,_GoString_);
-    *(void**)(&fn) =p ;
-    fn(HType,FilePath,Mail);
-}
-
-*/
-import "C"
 import (
 	"checkSum/config"
+	"checkSum/email/smtpclient"
+	"crypto/md5"
 	"fmt"
+	"gopkg.in/yaml.v3"
+	"io"
+	"log"
 	"os"
 	"path"
-	"time"
+	"runtime"
 )
+
+var Mailer *smtpclient.SMTP
 
 func main() {
 	readFlags()
@@ -31,25 +22,70 @@ func main() {
 			"для получения справки введите флаг -help")
 		os.Exit(1)
 	}
+
 	RootDir, err := config.RootDirIdentification()
 	if err != nil {
-		return
+		fmt.Printf("ошибка при определении корневой дирректории : " + err.Error())
 	}
 
-	handle := C.dlopen(C.CString(path.Join(RootDir, "lib", "lib.so")), C.RTLD_LAZY)
-	if handle == nil {
-		fmt.Printf("error opening ./lib/lib.h")
-		return
+	err = initer(RootDir)
+	if err != nil {
+		fmt.Printf("ошибка при иницмализации программы : " + err.Error())
 	}
-	sdPidGetUnit := C.dlsym(handle, C.CString("MakeHash"))
-	if sdPidGetUnit == nil {
-		fmt.Printf("error resolving sd_pid_get_unit function")
-		return
+
+	var hashString string
+	switch flagHashType {
+	case "MD5":
+		f, err := os.OpenFile(flagFilePath, os.O_RDONLY, 0777)
+		if err != nil {
+			fmt.Println("Lib open file err  " + err.Error())
+		}
+		defer f.Close()
+		h := md5.New()
+		//TODO Переделать на потоковое чтение
+		if _, err := io.Copy(h, f); err != nil {
+			fmt.Println("Lib read to hasher " + err.Error())
+		}
+		hashString = fmt.Sprintf("%x", h.Sum(nil))
+	default:
+		log.Printf("неизвестный тип хеширования : " + flagHashType)
 	}
-	C.callFromLib(sdPidGetUnit, flagHashType, flagFilePath, flagMail)
 
-	time.Sleep(10 * time.Second)
+	message := "Контрольная сумма файла " + flagFilePath + " \r\n" +
+		"Алгоритм хеширования  " + flagHashType + "\r\n" +
+		"хеш " + hashString
 
-	fmt.Printf("RunLib is at %p\n", sdPidGetUnit)
+	log.Printf(message)
 
+	log.Printf("отправка сообщения в почту")
+	err = Mailer.Send(flagMail, "Проверка КС из "+runtime.GOOS, message)
+	if err != nil {
+		fmt.Println("ошибка при отправке почты" + err.Error())
+	}
+	log.Printf("почта отправлена")
+
+}
+
+func initer(rootDir string) error {
+	conf := config.GetConfig()
+	f, err := os.ReadFile(path.Join(rootDir, "conf.yaml"))
+	if err != nil {
+		fmt.Println("Lib open file err  " + err.Error())
+	}
+	err = yaml.Unmarshal(f, conf)
+	if err != nil {
+		fmt.Println("ошибка при разборе файла конфигурации проекта  " + err.Error())
+	}
+	smtp, err := smtpclient.NewSMTP(
+		conf.Mailer.Smtp.Host,
+		conf.Mailer.Smtp.Port,
+		conf.Mailer.Smtp.From,
+		conf.Mailer.Smtp.Pass)
+	if err != nil {
+		fmt.Println("ошибка при инициализации почты  " + err.Error())
+
+	}
+	Mailer = smtp
+	log.Printf("инициализировано")
+	return nil
 }
